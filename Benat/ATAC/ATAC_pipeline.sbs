@@ -1,0 +1,232 @@
+#!/bin/bash
+
+#SBATCH --job-name=ATAC
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=10G
+#SBATCH --time=5-0:0:0
+#SBATCH -p medium
+#SBATCH --mail-type=END
+#SBATCH --mail-user=bariceta@unav.es
+#SBATCH -o /home/bariceta/RINEY/ATAC/ATAC_RINEY_%a.log  # Standard output A = array ID, a = task ID
+
+
+# Software
+module load Trimmomatic/0.38-Java-1.8
+module load FastQC/0.11.8-Java-1.8
+module load Bowtie2/2.3.4.2-foss-2018b
+module load SAMtools/1.9-foss-2018b
+module load picard/2.18.17-Java-1.8
+module load Java/1.8.0_192
+module load BEDTools/2.27.1-foss-2018b
+module load MACS2/2.1.0.20151222-foss-2018b-Python-2.7.15
+module load deepTools/3.2.0-foss-2018b-Python-2.7.15
+
+
+# Sample names
+FILES=($(cat $FILES))
+filename=${FILES[$SLURM_ARRAY_TASK_ID]}
+
+
+### HUMAN
+GenomeIndex=$Genome/hg38
+chrOrder=$Genome/names.txt
+BlackList=$Genome/hg38.blacklist.bed
+
+### MOUSE
+#GenomeIndex=/home/bariceta/Alignments/Bowtie2//mm10_Bowtie2/mm10
+#chrOrder=/home/bariceta/Alignments/Bowtie2//mm10_Bowtie2/names.txt
+#BlackList=/home/bariceta/Alignments/Bowtie2//mm10.blacklist.bed
+
+
+echo "SAMPLE: ${filename}" > ${BaseFolder}QC_Align/summary_${filename}.txt
+
+#############
+echo -e "STARTING \n $(date) \n" 
+echo "SAMPLE: ${filename}" 
+
+# QC: read counts 
+
+Counts1="$(zcat ${BaseFolder}fastq/${filename}_R1_001.fastq.gz | echo $((`wc -l`/4)))"
+Counts2="$(zcat ${BaseFolder}fastq/${filename}_R2_001.fastq.gz | echo $((`wc -l`/4)))"
+
+echo -e "READ COUNTS \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+echo -e "${filename}_R1 \t ${Counts1} \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+echo -e "${filename}_R2 \t ${Counts2} \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+
+# Mapping
+
+echo -e "Starting Alignment -------------------------------------- \n"
+
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sam ]; then
+	bowtie2 -p $SLURM_CPUS_PER_TASK -X 1000 --no-discordant --no-mixed --very-sensitive -x $GenomeIndex -1 ${BaseFolder}fastq/${filename}_R1_001.fastq.gz -2 ${BaseFolder}fastq/${filename}_R2_001.fastq.gz -S ${BaseFolder}BAM/${filename}.sam
+fi
+
+echo -e "Alignment done -------------------------------------- \n"
+
+# SAM to BAM (remove SAM)
+
+echo -e "Starting SAM to BAM -------------------------------------- \n"
+
+if [ ! -e ${BaseFolder}BAM/${filename}.bam ]; then
+	samtools view -o ${BaseFolder}BAM/${filename}.bam -bhS -@ $SLURM_CPUS_PER_TASK ${BaseFolder}BAM/${filename}.sam 
+fi
+
+echo -e "SAM to BAM done -------------------------------------- \n"
+
+# QC: % of mapped reads: show samtools flags 
+echo -e "SAMTOOLS FLAGSTAT - MAPPED READS \n"  >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+samtools flagstat ${BaseFolder}BAM/${filename}.bam  >> ${BaseFolder}QC_Align/summary_${filename}.txt
+echo -e "\n"  >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+# Sort BAM by location (remove original BAM)
+
+echo -e "Starting BAM sorting --------------------------------------\n"
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sort.bam ]; then
+	samtools sort -o ${BaseFolder}BAM/${filename}.sort.bam ${BaseFolder}BAM/${filename}.bam 
+fi
+
+echo -e "BAM sorting done --------------------------------------\n"
+
+# Mark and remove duplicates (remove sort.bam)
+
+echo -e "Starting mark and remove duplicates ------------------------------------------------ \n"
+# Samtools flags to remove duplicates + unmapped reads:
+#	a) -F 1028 => read unmapped // duplicate
+#   b) -F 1804 => read unmapped // mate unmapped // not primary alignment // read failing platform // duplicate
+
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sort.rmdup.bam ]; then
+	java -jar $EBROOTPICARD/picard.jar EstimateLibraryComplexity I=${BaseFolder}BAM/${filename}.sort.bam O=${BaseFolder}libMetrics/${filename}.bam.lib_comp.txt VALIDATION_STRINGENCY=SILENT
+	java -jar $EBROOTPICARD/picard.jar CollectInsertSizeMetrics I=${BaseFolder}BAM/${filename}.sort.bam O=${BaseFolder}libMetrics/${filename}.bam.insert_size.txt H=${BaseFolder}libMetrics/${filename}.bam.insert_size.pdf VALIDATION_STRINGENCY=SILENT
+	java -jar $EBROOTPICARD/picard.jar MarkDuplicates I=${BaseFolder}BAM/${filename}.sort.bam O=${BaseFolder}BAM/${filename}.sort.markdup.bam METRICS_FILE=${BaseFolder}libMetrics/${filename}.bam.mkdup.txt
+	samtools view -o ${BaseFolder}BAM/${filename}.sort.rmdup.bam -@ $SLURM_CPUS_PER_TASK -bh -F 1028 ${BaseFolder}BAM/${filename}.sort.markdup.bam 
+	java -jar $EBROOTPICARD/picard.jar CollectInsertSizeMetrics I=${BaseFolder}BAM/${filename}.sort.rmdup.bam O=${BaseFolder}libMetrics/${filename}.rmdup.bam.insert_size.txt H=${BaseFolder}libMetrics/${filename}.rmdup.bam.insert_size.pdf VALIDATION_STRINGENCY=SILENT
+fi 
+
+echo -e "Remove duplicates done ------------------------------------------------ \n"
+
+# QC: Show duplicates in samtools flags
+echo -e "SAMTOOLS FLAGSTAT - DUPLICATES \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+samtools flagstat ${BaseFolder}BAM/${filename}.sort.markdup.bam >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+echo -e "\n"  >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+# Remove Blacklist regions from BAM (remove sort.rmdup.bam)
+echo -e "Starting Remove blacklist regions -----------------------------------------\n"
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.bam ]; then
+	bedtools intersect -v -abam ${BaseFolder}BAM/${filename}.sort.rmdup.bam -b ${BlackList} > ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.bam
+fi
+
+echo -e "Remove blacklist regions done -----------------------------------------\n"
+
+# Remove chrM, chrUn... (remove sort.rmdup.rmblackls.bam)
+echo -e "Starting remove chrM and ChrUn -------------------------------------------\n"
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam ]; then
+	samtools view -h ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.bam | awk '{if($3 != "chrM" && $3 != "chrUn"){print $0}}'| samtools view -Sb - > ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam
+fi
+
+echo -e "Remove chrM and ChrUn done -------------------------------------------\n"
+
+# QC: Show final reads
+echo -e "SAMTOOLS FLAGSTAT - FINAL READS \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+samtools flagstat ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam >> ${BaseFolder}QC_Align/summary_${filename}.txt
+echo -e "\n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+# Index BAM
+echo -e "Starting Index BAM ------------------------------------------------------\n"
+
+if [ ! -e ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam.bai ]; then
+	samtools index ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam 
+fi
+
+echo -e "Index BAM done ------------------------------------------------------\n"
+
+# BigWigs
+# deeptools bamCoverage
+# Normalize by RPKM
+echo -e "Starting BigWigs --------------------------------------------------\n"
+
+if [ ! -e ${BaseFolder}BigWig/ ]; then
+	mkdir ${BaseFolder}BigWig/
+fi
+
+if [ ! -e ${BaseFolder}BigWig/${filename}.sort.rmdup.rmblackls.rmchr.norm.bw ]; then
+
+	bamCoverage --binSize 20 --normalizeUsing RPKM --effectiveGenomeSize 2913022398 \
+	-b ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam -of bigwig \
+	-o ${BaseFolder}BigWig/${filename}.sort.rmdup.rmblackls.rmchr.norm.bw
+fi
+
+echo -e "BigWigs done --------------------------------------------------\n"
+
+# QC: print scaling factors
+echo -e "BIGWIG SCALING FACTOR: X" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+echo -e "\n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+
+
+echo -e "Starting Peak calling -----------------------------------------------\n"
+
+if [ ! -e ${BaseFolder}PeakCalling/ ]; then
+	mkdir ${BaseFolder}PeakCalling/
+fi
+
+if [ ! -e ${BaseFolder}PeakCalling/${filename}_peaks.narrowPeak ]; then
+	macs2 callpeak -t ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam -n ${filename} --outdir ${BaseFolder}PeakCalling/ -f BAMPE
+fi
+
+echo -e "Peak calling done -----------------------------------------------\n"
+
+# QC: number of peaks
+
+pn=$(cat ${BaseFolder}PeakCalling/${filename}_peaks.narrowPeak | wc -l)
+echo -e "NUMBER OF PEAKS \t ${pn} \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+
+# QC: FRIP (fraction of reads in peaks)
+
+echo -e "FRIP --------------------\n"
+
+echo -e "total_reads \t reads_in_peaks \t FRIP \n" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+total_reads=$(samtools view -c ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam)
+
+# reads in peaks
+reads_in_peaks=$(bedtools sort -i ${BaseFolder}PeakCalling/${filename}_peaks.narrowPeak \
+  | bedtools merge -i stdin | bedtools intersect -u -nonamecheck \
+  -a ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam -b stdin -ubam | samtools view -c)
+
+# FRiP score
+FRiP=$(awk "BEGIN {print "${reads_in_peaks}"/"${total_reads}"}")
+echo -e "${total_reads} \t ${reads_in_peaks} \t ${FRiP}" >> ${BaseFolder}QC_Align/summary_${filename}.txt
+
+
+#NUM="$(bedtools sort -i ${BaseFolder}PeakCalling/${filename}_peaks.narrowPeak -faidx $chrOrder | bedtools intersect -a stdin -b ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam -c -sorted -g $chrOrder | awk '{i+=$5}END{print i}')"
+#DEM="$(samtools view -c ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam)"
+#FRIP="$(awk "BEGIN {print "${NUM}"/"${DEM}"}")"
+#echo -e "FRIP \n" >> ${BaseFolder}summary_${filename}.txt
+#echo -e "NUM: ${NUM} \t DEM: ${DEM} \t FRIP: ${FRIP} \n" >> ${BaseFolder}summary_${filename}.txt
+
+
+# Consensus peaks => R
+
+
+# Remove intermediate files
+
+if [ -e ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.rmchr.bam ] && [ -e ${BaseFolder}PeakCalling/${filename}_peaks.narrowPeak ] && [ -e ${BaseFolder}BigWig/${filename}.sort.rmdup.rmblackls.rmchr.norm.bw ]; then
+	rm -rf ${BaseFolder}BAM/${filename}.sam
+	rm -rf ${BaseFolder}BAM/${filename}.bam
+	rm -rf ${BaseFolder}BAM/${filename}.sort.bam
+	rm -rf ${BaseFolder}BAM/${filename}.sort.rmdup.bam
+	rm -rf ${BaseFolder}BAM/${filename}.sort.rmdup.rmblackls.bam
+fi
+
+
+echo -e "END --------------------------------------------------"

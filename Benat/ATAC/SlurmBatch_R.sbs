@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --job-name=Count
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=10G
+#SBATCH -p medium
+#SBATCH --mail-type=END
+#SBATCH --mail-user=bariceta@unav.es
+#SBATCH -x nodo11
+
+### LOAD PROGRAMS HERE ###
+module load R/4.0.0-foss-2018b
+module load libxml2/2.9.8-GCCcore-7.3.0
+module load R-bundle-Bioconductor/3.11-foss-2018b-R-4.0.0
+
+
+### Script or code
+Rscript /home/bariceta/scripts_new/ATAC/Count.R $BaseFolder $PairedEnd $countMat $Genome

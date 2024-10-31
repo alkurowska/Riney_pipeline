@@ -1,0 +1,25 @@
+#!/bin/bash
+
+#SBATCH --job-name=ATAC_QC
+#SBATCH -p short
+#SBATCH --mem=50Mb
+#SBATCH --mail-type=END
+#SBATCH --mail-user=bariceta@unav.es
+#SBATCH -x nodo11
+
+files=$(cat $FILES)
+echo "Sample Total_Reads Reads_in_Peaks Peaks FRiP" > ${BaseFolder}QC_Align/QC_table.txt
+
+for file in $files
+do
+	f="${BaseFolder}QC_Align/summary_${file}.txt"
+	tr=$(sed -n '66p' ${f} | gawk 'BEGIN{FS=" "}{print$1}END{}')
+	rip=$(sed -n '66p' ${f} | gawk 'BEGIN{FS=" "}{print$2}END{}')
+	peak=$(sed -n '62p' ${f} | gawk 'BEGIN{FS=" "}{print$4}END{}')
+	frip=$(sed -n '66p' ${f} | gawk 'BEGIN{FS=" "}{print$3}END{}')
+
+
+	echo "$file $tr $rip $peak $frip" >> ${BaseFolder}QC_Align/QC_table.txt
+
+done
+

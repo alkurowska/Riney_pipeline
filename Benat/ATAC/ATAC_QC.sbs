@@ -1,0 +1,80 @@
+#!/bin/bash
+
+#SBATCH --job-name=ATAC_QC
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=500Mb
+#SBATCH --time=5-0:0:0
+#SBATCH -p medium
+#SBATCH --mail-type=END
+#SBATCH --mail-user=bariceta@unav.es
+#SBATCH -o /home/bariceta/RINEY/ATAC/ATAC_QC.log  # Standard output A = array ID, a = task ID
+
+# Load software
+module load BEDTools/2.27.1-foss-2018b
+module load R/3.5.1-foss-2018b
+module load libxml2/2.9.8-GCCcore-7.3.0
+
+
+FILES=($(ls /home/bariceta/RINEY/ATAC/fastq/ | grep "fastq.gz" | sed -r 's/.{16}$//' | uniq ))
+BaseFolder=/home/bariceta/RINEY/ATAC/
+
+
+# Final summary table ---------------
+echo "Sample Initial_fragments Mapped_reads Mapped_fragments %_mapped duplicate_reads duplicate_fragments %_duplicates PBC1 PBC2 Final_reads Final_fragments Number_of_peaks FRiP" > ${BaseFolder}QC_Align/QC_table_new.txt
+
+for file in "${FILES[@]}";
+do
+	f="${BaseFolder}QC_Align/summary_${file}.txt"
+	#ip=$(sed -n '4p' ${f} | gawk 'BEGIN{FS="\t"}{print$2}END{}')
+	ir=$(sed -n '10p' ${f} | gawk 'BEGIN{FS=" "}{print$1}END{}')
+	ip=$(awk "BEGIN {print $ir/2}")
+	mr=$(sed -n '14p' ${f} | gawk 'BEGIN{FS=" "}{print$1}END{}')
+	mp=$(awk "BEGIN {print $mr/2}")
+	prm=$(awk "BEGIN {print ($mp/$ip)*100}")
+	dr=$(sed -n '30p' ${f} | gawk 'BEGIN{FS=" "}{print$1}END{}')
+	dp=$(awk "BEGIN {print $dr/2}")
+	prd=$(awk "BEGIN {print ($dp/$mp)*100}")
+	pbc1="pbc1"
+	pbc2="pbc2"
+	fr=$(sed -n '48p' ${f} | gawk 'BEGIN{FS=" "}{print$1}END{}')
+	fp=$(awk "BEGIN {print $fr/2}")
+	np=$(sed -n '62p' ${f} | gawk 'BEGIN{FS="\t"}{print$2}END{}')
+	#frip=$(sed -n '66p' ${f} | gawk 'BEGIN{FS="\t"}{print $3}END{}' | gawk 'BEGIN{FS=" "}{print $2}END{}')
+	frip=$(sed -n '66p' ${f} | gawk 'BEGIN{FS="\t"}{print $3}END{}')
+
+	echo "$file $ip $mr $mp $prm $dr $dp $prd $pbc1 $pbc2 $fr $fp $np $frip" >> ${BaseFolder}QC_Align/QC_table_new.txt
+done
+
+# Jaccard heatmap -----------------
+
+# out file to save results
+echo ${FILES[*]} > ${BaseFolder}QC_Align/jaccard.txt
+
+# Loop over every file pair
+i=0
+for f1 in "${FILES[@]}";
+do
+	echo -n ${FILES[$i]} >> ${BaseFolder}QC_Align/jaccard.txt
+
+		for f2 in "${FILES[@]}";
+		do
+			jaccard=`bedtools jaccard -a ${BaseFolder}PeakCalling/${f1}_peaks.narrowPeak -b ${BaseFolder}PeakCalling/${f2}_peaks.narrowPeak`
+			# report the jaccard stat for these two files
+	        value_jaccard=$(echo $jaccard | cut -d " " -f 7)
+	        echo -n " "$value_jaccard >> ${BaseFolder}QC_Align/jaccard.txt
+    	done
+    i=$((i+1))
+    echo "" >> ${BaseFolder}QC_Align/jaccard.txt
+done
+
+# Plot 
+export R_LIBS=/home/mainciburu/R/x86_64-pc-linux-gnu-library/3.5/
+
+InFile="${BaseFolder}QC_Align/jaccard.txt"
+OutFile="${BaseFolder}QC_Align/jaccard_heatmap.pdf"
+Rscript /home/bariceta/scripts_new/ATAC/jaccard.r $InFile $OutFile
+
+# Insert size plot -----------------------
+#InDir="${BaseFolder}/libMetrics"
+#OutFile="${BaseFolder}QC_Align/plot_insert_size.pdf"
+#Rscript /home/mainciburu/scripts/ATAC/plot_insert_size_atac.r $InDir $OutFile 
